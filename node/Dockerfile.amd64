@@ -18,6 +18,7 @@ ARG IPSET_VER=7.11-6
 ARG RUNIT_VER=2.1.2
 ARG BIRD_IMAGE=calico/bird:latest
 ARG BPFTOOL_IMAGE
+ARG NODE_BASE_IMAGE=registry.access.redhat.com/ubi8/ubi-minimal:latest
 FROM ${BPFTOOL_IMAGE} AS bpftool
 FROM ${BIRD_IMAGE} AS bird
 
@@ -83,7 +84,7 @@ RUN curl -sfL https://ftp.debian.org/debian/pool/main/r/runit/runit_${RUNIT_VER}
     patch -p1 < /svlogd_use_0644_permission_instead_of_0744.patch && \
     package/compile
 
-FROM registry.access.redhat.com/ubi8/ubi-minimal:latest AS ubi
+FROM ${NODE_BASE_IMAGE} AS ubi
 
 ARG GIT_VERSION
 ARG IPTABLES_VER

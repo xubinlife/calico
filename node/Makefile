@@ -6,6 +6,7 @@ PACKAGE_NAME = github.com/projectcalico/calico/node
 # e.g., <registry>/<name>:<tag>
 NODE_IMAGE            ?=node
 WINDOWS_IMAGE         ?=node-windows
+NODE_BASE_IMAGE       ?=registry.access.redhat.com/ubi8/ubi-minimal:latest
 
 # We don't include the windows images here because we build them differently
 # using targets within this makefile.
@@ -264,12 +265,12 @@ dist/LICENSE: ../LICENSE.md
 
 image $(NODE_IMAGE): register $(NODE_CONTAINER_MARKER)
 $(NODE_CONTAINER_CREATED): $(REMOTE_DEPS) ./Dockerfile.$(ARCH) $(NODE_CONTAINER_BINARY) $(INCLUDED_SOURCE) $(NODE_CONTAINER_FILES) $(TOOLS_MOUNTNS_BINARY) dist/LICENSE
-	$(DOCKER_BUILD) --network=host --build-arg BIN_DIR=$(NODE_CONTAINER_BIN_DIR) --build-arg BIRD_IMAGE=$(BIRD_IMAGE) --build-arg GIT_VERSION=$(GIT_VERSION) -t $(NODE_IMAGE):latest-$(ARCH) -f ./Dockerfile.$(ARCH) .
+	$(DOCKER_BUILD) --network=host --build-arg BIN_DIR=$(NODE_CONTAINER_BIN_DIR) --build-arg BIRD_IMAGE=$(BIRD_IMAGE) --build-arg GIT_VERSION=$(GIT_VERSION) --build-arg NODE_BASE_IMAGE=$(NODE_BASE_IMAGE) -t $(NODE_IMAGE):latest-$(ARCH) -f ./Dockerfile.$(ARCH) .
 	$(MAKE) retag-build-images-with-registries VALIDARCHES=$(ARCH) IMAGETAG=latest
 	touch $@
 
 $(NODE_CONTAINER_FIPS_CREATED): $(REMOTE_DEPS) ./Dockerfile.$(ARCH) $(NODE_CONTAINER_BINARY) $(INCLUDED_SOURCE) $(NODE_CONTAINER_FILES) $(TOOLS_MOUNTNS_BINARY) dist/LICENSE
-	$(DOCKER_BUILD) --network=host --build-arg BIN_DIR=$(NODE_CONTAINER_BIN_DIR) --build-arg BIRD_IMAGE=$(BIRD_IMAGE) --build-arg GIT_VERSION=$(GIT_VERSION) -t $(NODE_IMAGE):latest-fips-$(ARCH) -f ./Dockerfile.$(ARCH) .
+	$(DOCKER_BUILD) --network=host --build-arg BIN_DIR=$(NODE_CONTAINER_BIN_DIR) --build-arg BIRD_IMAGE=$(BIRD_IMAGE) --build-arg GIT_VERSION=$(GIT_VERSION) --build-arg NODE_BASE_IMAGE=$(NODE_BASE_IMAGE) -t $(NODE_IMAGE):latest-fips-$(ARCH) -f ./Dockerfile.$(ARCH) .
 	$(MAKE) retag-build-images-with-registries VALIDARCHES=$(ARCH) IMAGETAG=latest-fips LATEST_IMAGE_TAG=latest-fips
 	touch $@
 
