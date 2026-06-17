@@ -1,0 +1,308 @@
+name: Build Calico Node Image
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: "Calico source branch, tag or commit"
+        required: true
+        default: "release-v3.31.5-hygon"
+        type: string
+
+      image_registry:
+        description: "Target registry"
+        required: true
+        default: "docker.io"
+        type: choice
+        options:
+          - docker.io
+          - ghcr.io
+
+      image_repository:
+        description: "Target repository, without registry and tag"
+        required: true
+        default: "your-dockerhub-user/calico-node"
+        type: string
+
+      image_tag:
+        description: "Target image tag"
+        required: true
+        default: "v3.31.5-hygon.1"
+        type: string
+
+      node_base_image:
+        description: "Hygon-compatible runtime base image"
+        required: true
+        default: "your-registry.example.com/base/kylin-v10-hygon:latest"
+        type: string
+
+      push_image:
+        description: "Push image to registry"
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: build-calico-node-${{ inputs.source_ref }}-${{ inputs.image_tag }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build calico-node amd64
+    runs-on: ubuntu-24.04
+
+    timeout-minutes: 180
+
+    env:
+      ARCH: amd64
+      SOURCE_REF: ${{ inputs.source_ref }}
+      TARGET_REGISTRY: ${{ inputs.image_registry }}
+      TARGET_REPOSITORY: ${{ inputs.image_repository }}
+      TARGET_TAG: ${{ inputs.image_tag }}
+      NODE_BASE_IMAGE: ${{ inputs.node_base_image }}
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref }}
+          fetch-depth: 0
+
+      - name: Show source information
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Commit: $(git rev-parse HEAD)"
+          echo "Describe: $(git describe --tags --always --dirty)"
+          echo "Source ref: ${SOURCE_REF}"
+          echo "Runtime base image: ${NODE_BASE_IMAGE}"
+
+      - name: Validate inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ ! "${TARGET_REPOSITORY}" =~ ^[a-zA-Z0-9._/-]+$ ]]; then
+            echo "Invalid image_repository: ${TARGET_REPOSITORY}"
+            exit 1
+          fi
+
+          if [[ ! "${TARGET_TAG}" =~ ^[a-zA-Z0-9._-]+$ ]]; then
+            echo "Invalid image_tag: ${TARGET_TAG}"
+            exit 1
+          fi
+
+          if [[ "${NODE_BASE_IMAGE}" != *:* ]]; then
+            echo "node_base_image should use an explicit tag"
+            exit 1
+          fi
+
+      - name: Free runner disk space
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          sudo rm -rf /usr/local/lib/android || true
+          sudo rm -rf /usr/share/dotnet || true
+          sudo rm -rf /opt/ghc || true
+          sudo rm -rf /opt/hostedtoolcache/CodeQL || true
+
+          docker system prune -af || true
+          df -h
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        if: ${{ inputs.push_image && inputs.image_registry == 'docker.io' }}
+        uses: docker/login-action@v3
+        with:
+          registry: docker.io
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Login to GHCR
+        if: ${{ inputs.push_image && inputs.image_registry == 'ghcr.io' }}
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull and verify runtime base image
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          docker pull "${NODE_BASE_IMAGE}"
+
+          docker run --rm \
+            --entrypoint /bin/bash \
+            "${NODE_BASE_IMAGE}" \
+            -c '
+              set -e
+              uname -m
+              ldd --version
+              bash --version
+              /bin/true
+            '
+
+      - name: Build Calico node
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          BUILD_REPOSITORY="${TARGET_REGISTRY}/${TARGET_REPOSITORY}"
+
+          echo "Building temporary image:"
+          echo "  ${BUILD_REPOSITORY}:latest-amd64"
+
+          make -C node image \
+            ARCH="${ARCH}" \
+            GIT_VERSION="${TARGET_TAG}" \
+            NODE_IMAGE="${BUILD_REPOSITORY}" \
+            NODE_BASE_IMAGE="${NODE_BASE_IMAGE}"
+
+      - name: Locate built image
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          BUILD_REPOSITORY="${TARGET_REGISTRY}/${TARGET_REPOSITORY}"
+          SOURCE_IMAGE="${BUILD_REPOSITORY}:latest-amd64"
+
+          docker image inspect "${SOURCE_IMAGE}" >/dev/null
+
+          echo "SOURCE_IMAGE=${SOURCE_IMAGE}" >> "${GITHUB_ENV}"
+          echo "TARGET_IMAGE=${BUILD_REPOSITORY}:${TARGET_TAG}" >> "${GITHUB_ENV}"
+
+      - name: Tag image
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          docker tag "${SOURCE_IMAGE}" "${TARGET_IMAGE}"
+
+          echo "Built image:"
+          docker image inspect "${TARGET_IMAGE}" \
+            --format '{{.RepoTags}} {{.Id}} {{.Architecture}} {{.Os}}'
+
+      - name: Smoke test image
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          docker run --rm \
+            --entrypoint /bin/bash \
+            "${TARGET_IMAGE}" \
+            -c '
+              set -e
+
+              echo "== architecture =="
+              uname -m
+
+              echo "== glibc =="
+              ldd --version
+
+              echo "== bash =="
+              bash --version
+
+              echo "== calico-node =="
+              /bin/calico-node --version
+
+              echo "== networking tools =="
+              ip -Version
+              iptables --version
+              ipset --version
+              conntrack --version
+            '
+
+      - name: Check dynamic loader and libraries
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          docker run --rm \
+            --entrypoint /bin/bash \
+            "${TARGET_IMAGE}" \
+            -c '
+              set -e
+
+              echo "== bash interpreter =="
+              readelf -l /bin/bash 2>/dev/null | grep interpreter || true
+
+              echo "== calico-node interpreter =="
+              readelf -l /bin/calico-node 2>/dev/null | grep interpreter || true
+
+              echo "== bash libraries =="
+              ldd /bin/bash
+
+              echo "== calico-node libraries =="
+              ldd /bin/calico-node || true
+
+              echo "== iptables libraries =="
+              ldd /usr/sbin/iptables || true
+            '
+
+      - name: Push image
+        if: ${{ inputs.push_image }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          docker push "${TARGET_IMAGE}"
+
+      - name: Export image digest
+        if: ${{ inputs.push_image }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          docker pull "${TARGET_IMAGE}"
+
+          DIGEST="$(docker image inspect "${TARGET_IMAGE}" \
+            --format '{{index .RepoDigests 0}}')"
+
+          echo "Image: ${TARGET_IMAGE}"
+          echo "Digest: ${DIGEST}"
+
+          {
+            echo "## Calico node image"
+            echo
+            echo "- Source ref: \`${SOURCE_REF}\`"
+            echo "- Source commit: \`$(git rev-parse HEAD)\`"
+            echo "- Runtime base image: \`${NODE_BASE_IMAGE}\`"
+            echo "- Image: \`${TARGET_IMAGE}\`"
+            echo "- Digest: \`${DIGEST}\`"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Save image artifact
+        if: ${{ !inputs.push_image }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p artifacts
+          docker save "${TARGET_IMAGE}" | gzip > \
+            "artifacts/calico-node-${TARGET_TAG}-amd64.tar.gz"
+
+      - name: Upload image artifact
+        if: ${{ !inputs.push_image }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: calico-node-${{ inputs.image_tag }}-amd64
+          path: artifacts/calico-node-${{ inputs.image_tag }}-amd64.tar.gz
+          retention-days: 7
+          if-no-files-found: error
+
+      - name: Show disk usage
+        if: always()
+        shell: bash
+        run: |
+          df -h || true
+          docker system df || true
